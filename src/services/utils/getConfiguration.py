@@ -223,7 +223,7 @@ async def _prepare_configuration_response(
         "name": bridge_data.get("name") or bridge_data.get("bridges", {}).get("name") or "",
         "org_name": org_name,
         "bridge_id": result["bridges"].get("parent_id", result["bridges"].get("_id")),
-        "variables_state": result.get("bridges", {}).get("variables_state", {}),
+        "variables_state": result.get("bridges", {}).get("agent_info", {}).get("variables_state", {}),
         "built_in_tools": built_in_tools or result.get("bridges", {}).get("built_in_tools"),
         "fall_back": result.get("bridges", {}).get("fall_back") or {},
         "guardrails": guardrails_value,
@@ -265,7 +265,7 @@ async def _collect_connected_agent_configs(result, org_id, visited):
 
     bridge_payload = result.get("bridges", {})
     connected_agents = bridge_payload.get("connected_agents", {})
-    connected_agent_details = bridge_payload.get("connected_agent_details", {})
+    connected_agent_details = bridge_payload.get("agent_info", {}).get("connected_agent_details", {})
 
     aggregated_configs = {}
 

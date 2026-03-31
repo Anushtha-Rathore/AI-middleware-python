@@ -314,13 +314,13 @@ async def get_bridges_with_tools_and_apikeys(bridge_id, org_id, version_id=None)
                                 "$expr": {
                                     "$and": [
                                         {"$in": ["$_id", "$$bridge_ids"]},
-                                        {"$ne": ["$connected_agent_details", None]},
-                                        {"$ne": ["$connected_agent_details", {}]},
+                                        {"$ne": ["$agent_info.connected_agent_details", None]},
+                                        {"$ne": ["$agent_info.connected_agent_details", {}]},
                                     ]
                                 }
                             }
                         },
-                        {"$project": {"_id": 1, "connected_agent_details": 1}},
+                        {"$project": {"_id": 1, "agent_info.connected_agent_details": 1}},
                         {"$addFields": {"_id": {"$toString": "$_id"}}},
                     ],
                     "as": "agent_details_docs",
@@ -337,7 +337,7 @@ async def get_bridges_with_tools_and_apikeys(bridge_id, org_id, version_id=None)
                                     "$map": {
                                         "input": "$agent_details_docs",
                                         "as": "doc",
-                                        "in": ["$$doc._id", "$$doc.connected_agent_details"],
+                                        "in": ["$$doc._id", "$$doc.agent_info.connected_agent_details"],
                                     }
                                 }
                             },
@@ -900,10 +900,10 @@ async def get_agents_data(slug_name, user_email):
     bridges = await configurationModel.find_one(
         {
             "$or": [
-                {"$and": [{"page_config.availability": "public"}, {"page_config.url_slugname": slug_name}]},
+                {"$and": [{"agent_info.availability": "public"}, {"page_config.url_slugname": slug_name}]},
                 {
                     "$and": [
-                        {"page_config.availability": "private"},
+                        {"agent_info.availability": "private"},
                         {"page_config.url_slugname": slug_name},
                         {"page_config.allowedUsers": user_email},
                     ]
