@@ -34,7 +34,7 @@ async def chat_completion(request: Request, db_config: dict = Depends(add_config
     message_id = str(uuid.uuid1())
     data_to_send["body"]["message_id"] = message_id
     
-    response_format = data_to_send.get("body", {}).get("configuration", {}).get("response_format", {})
+    response_format = data_to_send.get("body", {}).get("settings", {}).get("response_format") 
     if response_format and response_format.get("type") != "default":
         try:
             # Publish the message to the queue

@@ -659,7 +659,7 @@ async def embedding(request_body):
             "customConfig": custom_config,
             "model_output_config": model_output_config,
             "text": text,
-            "response_format": configuration.get("response_format") or {},
+            "response_format": body.get("settings", {}).get("response_format") or {},
             "service": service,
             "version_id": body.get("version_id"),
             "bridge_id": body.get("bridge_id"),
