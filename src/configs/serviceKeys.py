@@ -130,23 +130,19 @@ ServiceKeys = {
             "max_tokens" : "max_output_tokens"
         },
     },
-    service_name["ai_ml"]: {
+    service_name["deepgram"]: {
         "default": {
-            "creativity_level": "temperature",
-            "probability_cutoff": "top_p",
-            "repetition_penalty": "frequency_penalty",
-            "novelty_penalty": "presence_penalty",
-            "log_probability": "logprobs",
-            "echo_input": "echo",
-            "input_text": "input",
-            "token_selection_limit": "topK",
-            "response_count": "n",
-            "additional_stop_sequences": "stopSequences",
-            "best_response_count": "best_of",
-            "response_suffix": "suffix",
-            "response_type": "response_format",
-            "max_tokens": "max_completion_tokens",
-        },
+            "model": "model",
+            "language": "language",
+            "smart_format": "smart_format",
+            "detect_language": "detect_language",
+            "diarize": "diarize",
+            "filler_words": "filler_words",
+            "punctuate": "punctuate",
+            "numerals": "numerals",
+            "detect_entities": "detect_entities",
+            "model_option": "model_option" 
+        }
     },
 }
 

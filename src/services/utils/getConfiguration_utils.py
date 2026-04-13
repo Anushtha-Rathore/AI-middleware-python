@@ -12,12 +12,13 @@ apiCallModel = db["apicalls"]
 
 async def validate_bridge(bridge_data, result):
     """Validate bridge status and existence"""
-    bridge_status = bridge_data.get("bridges", {}).get("bridge_status") or bridge_data.get("bridge_status", 0)
-    if bridge_status == 0:
-        raise Exception("Bridge is Currently Paused")
-
     if not result.get("success"):
-        return {"success": False, "error": "bridge_id does not exist"}
+        return {"success": False, "error": "Agent does not exist in this organization"}
+
+    bridge_status = bridge_data.get("bridges", {}).get("bridge_status") or bridge_data.get("bridge_status")
+    if bridge_status == 0:
+        raise Exception("Agent is Currently Paused")
+
     return None
 
 
@@ -197,8 +198,6 @@ def setup_api_key(service, result, apikey, chatbot):
     # Get API key for the service
     db_api_key = db_apikeys.get(service)
 
-    if service == "ai_ml" and not apikey and not db_api_key:
-        apikey = Config.AI_ML_APIKEY
     if service == "openai_completion":
         db_api_key = db_apikeys.get("openai")
 
@@ -222,13 +221,19 @@ def setup_api_key(service, result, apikey, chatbot):
         raise Exception("Could not find api key or Agent is not Published")
 
     # Handle fallback configuration
-    fallback_config = result.get("bridges", {}).get("fall_back")
+    fallback_config = result.get("bridges", {}).get("settings", {}).get("fall_back")
     if fallback_config:
         fallback_service = fallback_config.get("service")
         fallback_apikey = db_apikeys.get(fallback_service)
         if fallback_apikey:
-            result["bridges"]["fall_back"]["apikey"] = Helper.decrypt(fallback_apikey)
-            result["bridges"]["fall_back"]["apikey_object_id"] = db_apikeys_object_id.get(fallback_service)
+
+            if "settings" not in result["bridges"]:
+                    result["bridges"]["settings"] = {}
+            if "fall_back" not in result["bridges"]["settings"]:
+                    result["bridges"]["settings"]["fall_back"] = {}
+            result["bridges"]["settings"]["fall_back"]["apikey"] = Helper.decrypt(fallback_apikey)
+            result["bridges"]["settings"]["fall_back"]["apikey_object_id"] = db_apikeys_object_id.get(fallback_service)
+
 
     # Use provided API key or decrypt from database
     return apikey if apikey else Helper.decrypt(db_api_key)

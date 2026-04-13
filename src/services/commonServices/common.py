@@ -9,8 +9,8 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from config import Config
 from globals import TRANSFER_HISTORY, BadRequestException, logger
 from models.mongo_connection import db
-from src.configs.constant import redis_keys
-from src.utils.formatter import apply_variables_to_template_json
+from src.configs.constant import redis_keys, alert_types
+from src.utils.formatter import apply_variables_to_template_json, fix_json_string
 from src.handler.executionHandler import handle_exceptions
 from src.services.cache_service import find_in_cache, store_in_cache
 from src.services.utils.common_utils import (
@@ -38,7 +38,6 @@ from src.services.utils.common_utils import (
     process_variable_state,
     restructure_json_schema,
     validate_json_schema_configuration,
-    send_error,
     setup_agent_pre_tools,
     update_usage_metrics,
     process_batch_background_tasks,
@@ -50,9 +49,10 @@ from src.services.utils.rich_text_support import process_chatbot_response
 from src.services.auto_router_service import apply_auto_model_selection
 from ..utils.ai_middleware_format import Response_formatter
 from ..utils.helper import Helper
-from ..utils.send_error_webhook import send_error_to_webhook
 from .baseService.utils import sendResponse
+from src.send_alert import send_alert
 from .response_caching_service import handle_response_caching
+from workflow import execute_advanced_workflow
 
 app = FastAPI()
 configurationModel = db["configurations"]
@@ -104,7 +104,7 @@ async def chat_multiple_agents(request_body):
         # Save request-level values from "configuration" that must survive the
         # bridge-config merge (primary_config["configuration"] is the raw DB config
         # and will fully overwrite primary_body["configuration"] via .update()).
-        original_response_format = (body.get("configuration") or {}).get("response_format")
+        original_response_format = (body.get("settings") or {}).get("response_format")
 
         primary_body.update(primary_config)
         primary_body["wrapper_id"] = wrapper_id
@@ -115,7 +115,7 @@ async def chat_multiple_agents(request_body):
         # Restore response_format set at request-level (e.g. RTLayer from playground/
         # interface middleware) that was clobbered by the bridge-config merge above.
         if original_response_format is not None:
-            primary_body.setdefault("configuration", {})["response_format"] = original_response_format
+            primary_body.setdefault("settings", {})["response_format"] = original_response_format
             print(f"[chat_multiple_agents] response_format restored: type={original_response_format.get('type')}, channel={original_response_format.get('cred', {}).get('channel')}")
 
         # Create a complete request_body structure for the primary agent
@@ -167,7 +167,7 @@ async def chat(request_body):
         # Initialize transfer history for this request if not exists
         if transfer_request_id not in TRANSFER_HISTORY:
             TRANSFER_HISTORY[transfer_request_id] = []
-        if parsed_data.get("guardrails", {}).get("is_enabled", False):
+        if parsed_data.get("settings", {}).get("guardrails", {}).get("is_enabled", False):
             guardrails_result = await guardrails_check(parsed_data)
             if guardrails_result is not None:
                 # Content was blocked by guardrails, return the blocked response
@@ -214,17 +214,21 @@ async def chat(request_body):
 
         # Handle missing variables
         if missing_vars:
-            send_error(
-                parsed_data["bridge_id"],
-                parsed_data["org_id"],
-                missing_vars,
-                error_type="Variable",
+            asyncio.create_task(send_alert(
+                bridge_id=parsed_data["bridge_id"],
+                org_id=parsed_data["org_id"],
+                error_log=missing_vars,
+                error_type=alert_types["variable"],
                 bridge_name=parsed_data.get("name"),
+                org_name=parsed_data.get("org_name"),
                 is_embed=parsed_data.get("is_embed"),
                 user_id=parsed_data.get("user_id"),
                 thread_id=parsed_data.get("thread_id"),
                 service=parsed_data.get("service"),
-            )
+                is_playground=parsed_data.get("is_playground"),
+                api_collection=parsed_data.get("api_collection"),
+                is_external_error=False,
+            ))
 
         # Step 8: Configure Custom Settings
         custom_config = await configure_custom_settings(
@@ -244,7 +248,6 @@ async def chat(request_body):
             thread_info,
             timer,
             memory,
-            send_error_to_webhook,
             bridge_configurations,
         )
         # Step 10: json_schema service conversion
@@ -255,6 +258,15 @@ async def chat(request_body):
         if "response_type" in custom_config and isinstance(custom_config["response_type"], dict) and custom_config["response_type"].get("type") == "json_schema":
             custom_config["response_type"] = restructure_json_schema(
                 custom_config["response_type"], parsed_data["service"]
+            )
+        if parsed_data.get("mode") == "todo":
+            return await execute_advanced_workflow(
+                parsed_data=parsed_data,
+                bridge_configurations=bridge_configurations,
+                params=params,
+                timer=timer,
+                thread_info=thread_info,
+                transfer_request_id=transfer_request_id,
             )
 
         # Execute with retry mechanism
@@ -342,68 +354,52 @@ async def chat(request_body):
             result = {"success": False, "error": original_error, "response": {"usage": {}}, "modelResponse": {}}
 
         # Retry mechanism with fallback configuration
-        if execution_failed and parsed_data.get("fall_back") and parsed_data["fall_back"].get("is_enable", False):
+        if execution_failed and parsed_data.get("settings", {}).get("fall_back") and parsed_data["settings"]["fall_back"].get("is_enable", False):
             try:
                 # Store original configuration
-                fallback_config = parsed_data["fall_back"]
+                fallback_config = parsed_data["settings"]["fall_back"]
                 original_model = parsed_data["model"]
 
                 # Update parsed_data with fallback configuration
-                parsed_data["model"] = fallback_config.get("model", parsed_data["model"])
-                parsed_data["service"] = fallback_config.get("service", parsed_data["service"])
-                parsed_data["configuration"]["model"] = fallback_config.get("model")
-                # Check if service has changed - if so, create new service handler
-                if parsed_data["service"] != original_service:
-                    parsed_data["apikey"] = fallback_config.get("apikey")
-                    if parsed_data["apikey"] is None and fallback_config.get("service") == "ai_ml":
-                        parsed_data["apikey"] = Config.AI_ML_APIKEY
+                fallback_model = fallback_config.get("model", parsed_data["model"])
+                fallback_service = fallback_config.get("service", parsed_data["service"])
+                parsed_data["model"] = fallback_model
+                parsed_data["service"] = fallback_service
+                parsed_data["configuration"]["model"] = fallback_model
+                if fallback_config.get("apikey"):
+                    parsed_data["apikey"] = fallback_config["apikey"]
 
-                    # Load fresh model configuration for the fallback service and model
-                    (
-                        fallback_model_config,
-                        fallback_custom_config,
-                        fallback_model_output_config,
-                    ) = await load_model_configuration(
-                        parsed_data["model"], parsed_data["configuration"], parsed_data["service"]
+                # Always rebuild fallback handler/config to avoid stale customConfig/model reuse
+                (
+                    fallback_model_config,
+                    fallback_custom_config,
+                    fallback_model_output_config,
+                ) = await load_model_configuration(
+                    parsed_data["model"], parsed_data["configuration"], parsed_data["service"]
+                )
+
+                fallback_custom_config = await configure_custom_settings(
+                    fallback_model_config["configuration"], fallback_custom_config, parsed_data["service"]
+                )
+                params = build_service_params(
+                    parsed_data,
+                    fallback_custom_config,
+                    fallback_model_output_config,
+                    thread_info,
+                    timer,
+                    memory,
+                    bridge_configurations,
+                )
+
+                if (
+                    "response_type" in fallback_custom_config
+                    and fallback_custom_config["response_type"].get("type") == "json_schema"
+                ):
+                    fallback_custom_config["response_type"] = restructure_json_schema(
+                        fallback_custom_config["response_type"], parsed_data["service"]
                     )
 
-                    # Configure custom settings specifically for the fallback service
-                    fallback_custom_config = await configure_custom_settings(
-                        fallback_model_config["configuration"], fallback_custom_config, parsed_data["service"]
-                    )
-                    params = build_service_params(
-                        parsed_data,
-                        fallback_custom_config,
-                        fallback_model_output_config,
-                        thread_info,
-                        timer,
-                        memory,
-                        send_error_to_webhook,
-                        bridge_configurations,
-                    )
-                    # Step 9 : json_schema service conversion
-                    if (
-                        "response_type" in fallback_custom_config
-                        and fallback_custom_config["response_type"].get("type") == "json_schema"
-                    ):
-                        fallback_custom_config["response_type"] = restructure_json_schema(
-                            fallback_custom_config["response_type"], parsed_data["service"]
-                        )
-
-                    # Create new service handler for the fallback service
-                    class_obj = await Helper.create_service_handler(params, parsed_data["service"])
-                else:
-                    # Same service, just update existing class_obj
-                    class_obj.model = parsed_data["model"]
-                    if fallback_config.get("apikey"):
-                        class_obj.apikey = fallback_config["apikey"]
-                        if class_obj.apikey is None and fallback_config.get("service") == "ai_ml":
-                            class_obj.apikey = Config.AI_ML_APIKEY
-
-                    # Reconfigure custom_config for fallback service
-                    class_obj.customConfig = await configure_custom_settings(
-                        model_config["configuration"], custom_config, parsed_data["service"]
-                    )
+                class_obj = await Helper.create_service_handler(params, parsed_data["service"])
 
                 # Execute with updated configuration
                 result = await class_obj.execute()
@@ -411,9 +407,9 @@ async def chat(request_body):
 
                 # Mark that this was a retry attempt and store original error
                 if result["success"]:
-                    result["response"]["data"]["firstAttemptError"] = (
-                        f"Original attempt failed with {original_service}/{original_model}: {original_error}. Retried with {parsed_data['service']}/{parsed_data['model']}"
-                    )
+                    firstAttemptError = f"Original attempt failed with {original_service}/{original_model}: {original_error}. Retried with {parsed_data['service']}/{parsed_data['model']}"
+                    result["response"]["data"]["firstAttemptError"] = firstAttemptError
+                    result["historyParams"]["firstAttemptError"] = firstAttemptError
                     result["response"]["data"]["fallback"] = True
 
             except Exception as retry_error:
@@ -424,25 +420,36 @@ async def chat(request_body):
                 # Restore original configuration before raising
                 parsed_data["model"] = original_model
                 parsed_data["service"] = original_service
+                parsed_data["firstAttemptError"] = (
+                        f"Original attempt failed with {original_service}/{original_model}: {original_error}. Retried with {fallback_config['service']}/{fallback_config['model']}"
+                    )
                 raise retry_error from original_exception
 
         if not result["success"]:
             raise ValueError(result)
         # Add message_id to response
         result["response"]["data"]["message_id"] = parsed_data["message_id"]
+        if getattr(class_obj, 'tool_call_limit_error', None):
+            result["error"] = class_obj.tool_call_limit_error
+        if result.get("error"):
+            result["response"]["error"] = result["error"]
 
         if original_error:
-            send_error(
-                parsed_data["bridge_id"],
-                parsed_data["org_id"],
-                original_error,
-                error_type="retry_mechanism",
+            asyncio.create_task(send_alert(
+                bridge_id=parsed_data["bridge_id"],
+                org_id=parsed_data["org_id"],
+                error_log=original_error,
+                error_type=alert_types["retry_mechanism"],
                 bridge_name=parsed_data.get("name"),
+                org_name=parsed_data.get("org_name"),
                 is_embed=parsed_data.get("is_embed"),
                 user_id=parsed_data.get("user_id"),
                 thread_id=parsed_data.get("thread_id"),
                 service=parsed_data.get("service"),
-            )
+                is_playground=parsed_data.get("is_playground"),
+                api_collection=parsed_data.get("api_collection"),
+                is_external_error=False,
+            ))
 
         if parsed_data["configuration"]["type"] == "chat":
             if parsed_data["is_rich_text"] and parsed_data["bridgeType"] and not parsed_data["reasoning_model"]:
@@ -464,7 +471,6 @@ async def chat(request_body):
         template_data = None
         if isinstance(response_type, dict) and response_type.get('is_template', False):
             try:
-                html_output = ""
                 template_ids = response_type.get('template_id', [])
                 if not template_ids:
                     logger.warning("Template Rendering: 'is_template' is True but 'template_id' is missing or empty.")
@@ -474,8 +480,7 @@ async def chat(request_body):
                     richui_templates = parsed_data.get('richui_templates', {})
 
                     # AI Result Data
-                    ai_data = result.get('response', {}).get('data', {})
-                    ai_data = json.loads(json.dumps(ai_data.get('content', ai_data)))
+                    ai_data = result.get('response', {}).get('data', {}).get('content', {})
                     # Unwrap 'item' if present
                     if isinstance(ai_data, dict) and "item" in ai_data:
                         ai_data = ai_data["item"]
@@ -486,8 +491,13 @@ async def chat(request_body):
                                 ai_data = parsed["item"]
                             else:
                                 ai_data = parsed
-                        except:
-                            pass
+                        except Exception:
+                            try:
+                                repaired = fix_json_string(ai_data)
+                                ai_data = json.loads(repaired)
+                                ai_data = ai_data.get("item")
+                            except Exception:
+                                pass  # keep ai_data as the raw string
                     
                     # Get template directly using widget_id from ai_data
                     if isinstance(ai_data, dict):
@@ -659,7 +669,7 @@ async def embedding(request_body):
             "customConfig": custom_config,
             "model_output_config": model_output_config,
             "text": text,
-            "response_format": configuration.get("response_format") or {},
+            "response_format": body.get("settings", {}).get("response_format") or {},
             "service": service,
             "version_id": body.get("version_id"),
             "bridge_id": body.get("bridge_id"),
@@ -729,15 +739,21 @@ async def batch(request_body):
 
         # Send alert if there are any missing variables across all batch items
         if all_missing_vars:
-            send_error(
-                parsed_data["bridge_id"],
-                parsed_data["org_id"],
-                all_missing_vars,
-                error_type="Variable",
+            asyncio.create_task(send_alert(
+                bridge_id=parsed_data["bridge_id"],
+                org_id=parsed_data["org_id"],
+                error_log=all_missing_vars,
+                error_type=alert_types["variable"],
                 bridge_name=parsed_data.get("name"),
+                org_name=parsed_data.get("org_name"),
                 is_embed=parsed_data.get("is_embed"),
                 user_id=parsed_data.get("user_id"),
-            )
+                thread_id=parsed_data.get("thread_id"),
+                service=parsed_data.get("service"),
+                is_playground=parsed_data.get("is_playground"),
+                api_collection=parsed_data.get("api_collection"),
+                is_external_error=False,
+            ))
 
         # Store processed prompts in parsed_data
         parsed_data["processed_prompts"] = processed_prompts
@@ -838,7 +854,6 @@ async def image(request_body):
             thread_info,
             timer,
             None,
-            send_error_to_webhook,
             bridge_configurations,
         )
 
