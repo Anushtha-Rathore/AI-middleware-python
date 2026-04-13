@@ -567,6 +567,10 @@ async def chat(request_body):
                 parsed_data, result, params, thread_info, transfer_request_id, bridge_configurations
             )
         else:
+            # Update usage metrics for playground calls
+            update_usage_metrics(parsed_data, params, latency, result=result, success=True)
+            result["response"]["usage"]["cost"] = parsed_data["usage"].get("expectedCost", 0)
+
             if parsed_data.get("testcase_data", {}).get("run_testcase", False):
                 from src.services.commonServices.testcases import process_single_testcase_result
 
@@ -577,6 +581,15 @@ async def chat(request_body):
                 result["response"]["testcase_result"] = testcase_result
             else:
                 await process_background_tasks_for_playground(result, parsed_data)
+
+            # Create history parameters only if not already present (for both playground and normal)
+            if not result.get("historyParams"):
+                result["historyParams"] = create_history_params(parsed_data, None, class_obj, thread_info)
+            
+            # Save history for playground requests
+            await process_background_tasks(
+                parsed_data, result, params, thread_info, transfer_request_id, bridge_configurations
+            )
         
 
         # Save agent bridge_id to Redis for 3 days (259200 seconds)
@@ -603,18 +616,18 @@ async def chat(request_body):
     except (Exception, ValueError, BadRequestException) as error:
         if not isinstance(error, BadRequestException):
             logger.error(f"Error in chat service: %s, {str(error)}, {traceback.format_exc()}")
-        if not parsed_data["is_playground"]:
-            # Create latency object and update usage metrics
-            latency = create_latency_object(timer, params)
-            update_usage_metrics(parsed_data, params, latency, error=error, success=False)
+        # Create latency object and update usage metrics
+        latency = create_latency_object(timer, params)
+        update_usage_metrics(parsed_data, params, latency, error=error, success=False)
 
-            # Create history parameters
-            parsed_data["historyParams"] = create_history_params(parsed_data, error, class_obj)
+        # Create history parameters
+        parsed_data["historyParams"] = create_history_params(parsed_data, error, class_obj)
+        if not parsed_data["is_playground"]:
             await sendResponse(
                 parsed_data["response_format"], result.get("error", str(error)), variables=parsed_data["variables"]
             ) if parsed_data["response_format"]["type"] != "default" else None
-            # Process background tasks for error handling
-            await process_background_tasks_for_error(parsed_data, error)
+        # Process background tasks for error handling
+        await process_background_tasks_for_error(parsed_data, error)
         # Check for a chained exception and create a structured error object
         if error.__cause__:
             # Combine both initial and fallback errors into a single string

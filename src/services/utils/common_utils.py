@@ -1479,7 +1479,11 @@ async def sse_stream_and_finalize(class_obj, parsed_data, params, timer, thread_
                 parsed_data, result, params, thread_info, transfer_request_id, bridge_configurations
             )
         else:
+            update_usage_metrics(parsed_data, params, latency, result=result, success=True)
             await process_background_tasks_for_playground(result, parsed_data)
+            await process_background_tasks(
+                parsed_data, result, params, thread_info, transfer_request_id, bridge_configurations
+            )
 
         if class_obj.streamer:
             model_response = result.get("modelResponse", {}) if isinstance(result, dict) else {}

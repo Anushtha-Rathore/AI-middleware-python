@@ -29,7 +29,7 @@ async def auth_and_rate_limit(request: Request):
 
 @router.post("/chat/completion", dependencies=[Depends(auth_and_rate_limit)])
 async def chat_completion(request: Request, db_config: dict = Depends(add_configuration_data_to_body)):
-    request.state.is_playground = False
+    # request.state.is_playground = False
     request.state.version = 2
     data_to_send = await make_request_data(request)
 
@@ -69,7 +69,7 @@ async def openai_sdk_responses(request: Request, db_config: dict = Depends(add_c
 
 @router.post("/playground/chat/completion/{bridge_id}", dependencies=[Depends(auth_and_rate_limit)])
 async def playground_chat_completion_bridge(
-    request: Request, db_config: dict = Depends(add_configuration_data_to_body)
+    request: Request, bridge_id: str, db_config: dict = Depends(add_configuration_data_to_body)
 ):
     request.state.is_playground = True
     request.state.version = 2
@@ -79,7 +79,8 @@ async def playground_chat_completion_bridge(
     data_to_send["body"]["message_id"] = message_id
 
     org_id = data_to_send["state"]["profile"]["org"]["id"]
-    bridge_id = data_to_send.get("body", {}).get("bridge_id")
+    # Use bridge_id from path parameter if not in body
+    bridge_id = data_to_send.get("body", {}).get("bridge_id") or bridge_id
     version_id = data_to_send.get("body", {}).get("version_id")
     channel_id = f"{org_id}_{bridge_id}_{version_id}"
     flag = data_to_send.get("body", {}).get("flag") or False
